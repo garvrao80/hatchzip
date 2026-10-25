@@ -17,7 +17,7 @@ use cli::{
     Cli, Command, EXIT_DAMAGED, EXIT_FAILURE, EXIT_NO_SPACE, EXIT_PASSWORD, EXIT_PAUSED, Secret,
     Space, Target,
 };
-use hatchzip_core::archive::storage::Reads;
+use hatchzip_core::archive::storage::{Reads, Storage};
 use hatchzip_core::archive::{Damaged, Kind, PasswordNeeded, WrongPassword};
 use hatchzip_core::engine::{self, Job, Outcome, Progress, Run};
 use hatchzip_core::human;
@@ -473,6 +473,17 @@ fn test_command(archive: &Path, secret: Secret) -> Result<u8> {
             "this archive is partially extracted and cannot be tested. Run extract to resume it, or restore to undo it"
         ),
     };
+    match check_sfv(&job.storage) {
+        Ok(Some(sfv)) => {
+            let name = sfv.file_name().unwrap_or_default().to_string_lossy();
+            say!("{GOOD}Checksums match:{GOOD:#} volumes verified against {name}.");
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("{ERROR}error:{ERROR:#} {e:#}");
+            return Ok(EXIT_DAMAGED);
+        }
+    }
     if let Err(e) = verify(&job) {
         eprintln!("{ERROR}error:{ERROR:#} {e:#}");
         return Ok(EXIT_DAMAGED);
@@ -482,6 +493,15 @@ fn test_command(archive: &Path, secret: Secret) -> Result<u8> {
         entries(job.item_count())
     );
     Ok(0)
+}
+
+fn check_sfv(storage: &Storage) -> Result<Option<PathBuf>> {
+    let reads = storage.reads();
+    reads.reset();
+    let reading = Reading::show(&reads);
+    let result = session::check_sfv(storage);
+    reading.finish();
+    result
 }
 
 fn entries(n: usize) -> String {
@@ -744,6 +764,20 @@ fn extract(
                     code: EXIT_DAMAGED,
                     saved: false,
                 });
+            }
+            match check_sfv(&job.storage) {
+                Ok(Some(sfv)) => {
+                    let name = sfv.file_name().unwrap_or_default().to_string_lossy();
+                    say!("{GOOD}Checksums match:{GOOD:#} volumes verified against {name}.");
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("{ERROR}error:{ERROR:#} {e:#}");
+                    return Ok(Ended::Stopped {
+                        code: EXIT_DAMAGED,
+                        saved: false,
+                    });
+                }
             }
             // Nothing is removed when the archive is kept, so there is
             // nothing to confirm.

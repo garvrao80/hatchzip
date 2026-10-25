@@ -360,3 +360,107 @@ fn compressed_tar_streams_are_refused_without_touching_them() {
         assert!(!side_files(&archive)[0].exists());
     }
 }
+
+#[test]
+fn split_archives_verified_by_sfv_extract_successfully() {
+    let tmp = TempDir::new().unwrap();
+    let files = sample_files();
+    let built = build_7z(tmp.path(), &files, false);
+    let first = split_into(tmp.path(), built, 3);
+    let v1 = &first;
+    let v2 = first.with_extension("002");
+    let v3 = first.with_extension("003");
+    assert!(v1.exists() && v2.exists() && v3.exists());
+
+    let crc1 = crc32fast::hash(&fs::read(v1).unwrap());
+    let crc2 = crc32fast::hash(&fs::read(&v2).unwrap());
+    let crc3 = crc32fast::hash(&fs::read(&v3).unwrap());
+
+    let sfv_content = format!(
+        "; Generated SFV\r\ngame.7z.001 {crc1:08X}\r\ngame.7z.002 {crc2:08X}\r\ngame.7z.003 {crc3:08X}\r\n"
+    );
+    let sfv_path = tmp.path().join("game.7z.sfv");
+    fs::write(&sfv_path, sfv_content).unwrap();
+
+    let out = tmp.path().join("out");
+    let run = extract(&first, &out, &[]);
+    assert_ok(&run);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("volumes verified against game.7z.sfv"),
+        "{stdout}"
+    );
+    assert_tree(&out, &files);
+    assert_consumed(&first);
+}
+
+#[test]
+fn damaged_volume_stopped_by_sfv_before_modifying_anything() {
+    let tmp = TempDir::new().unwrap();
+    let files = sample_files();
+    let built = build_7z(tmp.path(), &files, false);
+    let first = split_into(tmp.path(), built, 3);
+    let before = snapshot(&first);
+
+    let v1 = &first;
+    let v2 = first.with_extension("002");
+    let v3 = first.with_extension("003");
+
+    let crc1 = crc32fast::hash(&fs::read(v1).unwrap());
+    let crc2 = crc32fast::hash(&fs::read(&v2).unwrap()) ^ 0xFFFF_FFFF;
+    let crc3 = crc32fast::hash(&fs::read(&v3).unwrap());
+
+    let sfv_content = format!(
+        "; Generated SFV\r\ngame.7z.001 {crc1:08X}\r\ngame.7z.002 {crc2:08X}\r\ngame.7z.003 {crc3:08X}\r\n"
+    );
+    let sfv_path = tmp.path().join("game.7z.sfv");
+    fs::write(&sfv_path, sfv_content).unwrap();
+
+    let out = tmp.path().join("out");
+    let run = extract(&first, &out, &[]);
+    assert!(!run.status.success());
+    assert_eq!(run.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("game.7z.002 does not match its CRC-32 in game.7z.sfv"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Nothing was modified"), "{stderr}");
+
+    assert_unchanged(&before);
+    assert_no_side_files(&first);
+}
+
+#[test]
+fn missing_volume_in_sfv_stopped_before_modifying_anything() {
+    let tmp = TempDir::new().unwrap();
+    let files = sample_files();
+    let built = build_7z(tmp.path(), &files, false);
+    let first = split_into(tmp.path(), built, 2);
+    let before = snapshot(&first);
+
+    let v1 = &first;
+    let v2 = first.with_extension("002");
+
+    let crc1 = crc32fast::hash(&fs::read(v1).unwrap());
+    let crc2 = crc32fast::hash(&fs::read(&v2).unwrap());
+
+    let sfv_content = format!(
+        "; Generated SFV\r\ngame.7z.001 {crc1:08X}\r\ngame.7z.002 {crc2:08X}\r\ngame.7z.003 12345678\r\n"
+    );
+    let sfv_path = tmp.path().join("game.7z.sfv");
+    fs::write(&sfv_path, sfv_content).unwrap();
+
+    let out = tmp.path().join("out");
+    let run = extract(&first, &out, &[]);
+    assert!(!run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("game.7z.003 listed in game.7z.sfv is missing"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Nothing was modified"), "{stderr}");
+
+    assert_unchanged(&before);
+    assert_no_side_files(&first);
+}

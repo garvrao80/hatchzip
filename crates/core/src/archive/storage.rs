@@ -37,6 +37,7 @@ pub struct Storage {
     /// can't cost the user an archive they asked to keep.
     whole: AtomicBool,
     reads: Arc<Reads>,
+    sfv_checked: AtomicBool,
 }
 
 /// How much of the archive its readers have read. Opening a compressed tar
@@ -136,7 +137,17 @@ impl Storage {
             first,
             whole: AtomicBool::new(false),
             reads: Arc::default(),
+            sfv_checked: AtomicBool::new(false),
         })
+    }
+
+    /// Whether this storage has already been verified against an .sfv file.
+    pub fn sfv_checked(&self) -> bool {
+        self.sfv_checked.load(Ordering::Relaxed)
+    }
+
+    pub fn mark_sfv_checked(&self) {
+        self.sfv_checked.store(true, Ordering::Relaxed);
     }
 
     /// From now on nothing may shrink, punch, write to or delete the
@@ -385,6 +396,11 @@ impl Storage {
         reads.done.store(0, Ordering::Relaxed);
         reads.total.store(self.original_len(), Ordering::Relaxed);
         self.reads = reads;
+    }
+
+    /// Shares the byte counter used by archive reads with another reader.
+    pub fn reads(&self) -> Arc<Reads> {
+        self.reads.clone()
     }
 
     /// Starts the count over for a pass that reads `total` bytes.

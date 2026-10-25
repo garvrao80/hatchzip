@@ -390,6 +390,7 @@ fn test(
             "this archive is partially extracted and cannot be tested. Resume or restore it first"
         ),
     };
+    session::check_sfv(&job.storage)?;
     verify(&job, counters, send).context("the archive is damaged")?;
     send(Update::Tested(job.item_count()));
     Ok(())

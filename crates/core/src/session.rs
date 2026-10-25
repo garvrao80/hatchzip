@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
-use crate::archive::storage::{self, Reads};
+use crate::archive::storage::{self, Reads, Storage};
 use crate::engine::Job;
 use crate::fsutil;
 use crate::journal::{Journal, Paths, Plan};
@@ -595,6 +595,7 @@ pub fn begin(
         // Front ends say this earlier; this is the last line.
         bail!("{why}. It can be extracted while keeping the archive");
     }
+    crate::sfv::check_volumes(&job.storage)?;
     // The default folder too: a resume trusts the journal only when this
     // computer recorded starting the extraction (see [`check_output`]).
     crate::chosen::remember(&paths.archive, &output);
@@ -623,6 +624,11 @@ pub fn begin(
         replace,
     };
     Journal::create(paths, &job.storage, plan)
+}
+
+/// Checks the archive's volumes against an `.sfv` file next to it, if present.
+pub fn check_sfv(storage: &Storage) -> Result<Option<PathBuf>> {
+    crate::sfv::check_volumes(storage)
 }
 
 /// Before continuing a crashed run, deletes what it wrote for batches it

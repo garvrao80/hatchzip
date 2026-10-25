@@ -1973,6 +1973,7 @@ dependencies = [
  "sevenz-rust2",
  "sha2",
  "tar",
+ "tempfile",
  "unrar-ng-sys",
  "windows-sys 0.61.2",
  "zip",

@@ -38,6 +38,9 @@ pbkdf2 = { version = "0.13.0", optional = true }
 sha2 = { version = "0.11.1", optional = true }
 zip.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 # RAR archives, decoded by UnRAR. Off by default: without it the build is
 # open source throughout and needs no C++ compiler, and a RAR archive is
