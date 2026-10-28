@@ -24,7 +24,8 @@ use hatchzip_gui::{
 };
 use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
 use slint::language::ColorScheme;
-use slint::{ComponentHandle, LogicalSize, Timer, TimerMode};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalSize, Model, Timer, TimerMode};
 
 const PASSWORD: &str = "open sesame";
 
@@ -135,6 +136,46 @@ fn main_window_flow(scheme: ColorScheme, tag: &str) {
         dir.path().join("northwind").display().to_string()
     );
     shot(ui.window(), &format!("{tag}-2-opened"));
+
+    // Click a folder and navigate the same tree by keyboard.
+    let window = ui.window();
+    let pos = slint::LogicalPosition::new(90.0, 180.0);
+    window.dispatch_event(WindowEvent::PointerMoved { position: pos });
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: pos,
+        button: PointerEventButton::Left,
+    });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: pos,
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(ui.get_entries().row_count(), 5);
+    assert_eq!(ui.get_entries().row_data(2).unwrap().name, "northwind");
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: Key::LeftArrow.into(),
+    });
+    assert_eq!(ui.get_entries().row_count(), 4);
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: Key::RightArrow.into(),
+    });
+    assert_eq!(ui.get_entries().row_count(), 5);
+    shot(ui.window(), &format!("{tag}-2-tree-expanded"));
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: Key::DownArrow.into(),
+    });
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: Key::DownArrow.into(),
+    });
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: Key::RightArrow.into(),
+    });
+    assert_eq!(ui.get_entries().row_count(), 35);
+    for _ in 0..29 {
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: Key::DownArrow.into(),
+        });
+    }
+    shot(ui.window(), &format!("{tag}-2-tree-scrolled"));
 
     // Asking to keep 100 TB free makes it not fit, and says by how much.
     ui.set_keep_free("100000".into());
