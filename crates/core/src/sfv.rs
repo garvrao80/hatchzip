@@ -12,9 +12,9 @@ use crate::archive::storage::{Reads, Storage};
 
 /// An entry parsed from an `.sfv` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SfvEntry {
-    pub file_name: String,
-    pub crc32: u32,
+pub(crate) struct SfvEntry {
+    pub(crate) file_name: String,
+    pub(crate) crc32: u32,
 }
 
 /// Parses the contents of an `.sfv` file.
@@ -22,7 +22,7 @@ pub struct SfvEntry {
 /// Lines starting with `;` and blank lines are ignored.
 /// Data lines take the format `<filename> <crc32>`, where the CRC-32 is an 8-character
 /// hex string at the end of the line.
-pub fn parse_sfv(content: &str) -> Vec<SfvEntry> {
+pub(crate) fn parse_sfv(content: &str) -> Vec<SfvEntry> {
     let mut entries = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -51,7 +51,7 @@ pub fn parse_sfv(content: &str) -> Vec<SfvEntry> {
 }
 
 /// Computes the CRC-32 of a file by reading it in 128 KiB chunks.
-pub fn file_crc32(path: &Path, reads: &Reads, cancelled: &dyn Fn() -> bool) -> Result<u32> {
+pub(crate) fn file_crc32(path: &Path, reads: &Reads, cancelled: &dyn Fn() -> bool) -> Result<u32> {
     let mut file = File::open(path).with_context(|| {
         format!(
             "opening {} to verify CRC-32. Nothing was modified",
@@ -79,7 +79,7 @@ pub fn file_crc32(path: &Path, reads: &Reads, cancelled: &dyn Fn() -> bool) -> R
 }
 
 /// Locates a matching `.sfv` file next to the archive, if one exists.
-pub fn find_sfv(storage: &Storage) -> Option<(PathBuf, Vec<SfvEntry>)> {
+pub(crate) fn find_sfv(storage: &Storage) -> Option<(PathBuf, Vec<SfvEntry>)> {
     let primary = storage.primary();
     let parts = storage.parts();
     let dir = primary.parent().unwrap_or(Path::new("."));
@@ -133,12 +133,12 @@ fn entries_match_archive(entries: &[SfvEntry], parts: &[crate::archive::storage:
 /// Returns `Ok(Some(sfv_path))` if an `.sfv` file was found and verified,
 /// `Ok(None)` if no `.sfv` file exists next to the archive, or an error if a volume
 /// fails its CRC-32 check or is missing.
-pub fn check_volumes(storage: &Storage) -> Result<Option<PathBuf>> {
+pub(crate) fn check_volumes(storage: &Storage) -> Result<Option<PathBuf>> {
     check_volumes_cancellable(storage, &|| false)
 }
 
 /// Checks each chunk for cancellation before reading it.
-pub fn check_volumes_cancellable(
+pub(crate) fn check_volumes_cancellable(
     storage: &Storage,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<PathBuf>> {

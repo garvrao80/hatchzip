@@ -21,6 +21,6 @@ mod platform;
 pub mod replace;
 pub mod restore;
 pub mod session;
-pub mod sfv;
+mod sfv;
 
 pub use engine::human;
