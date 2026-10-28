@@ -369,7 +369,6 @@ fn multi_member_gzip_extracts_and_resumes() {
 }
 
 /// A pax record: its length, counting itself, then `key=value`.
-#[cfg(unix)]
 fn pax(key: &str, value: &str) -> Vec<u8> {
     let body = format!(" {key}={value}\n");
     let mut len = body.len() + 1;

@@ -627,8 +627,8 @@ pub fn begin(
 }
 
 /// Checks the archive's volumes against an `.sfv` file next to it, if present.
-pub fn check_sfv(storage: &Storage) -> Result<Option<PathBuf>> {
-    crate::sfv::check_volumes(storage)
+pub fn check_sfv(storage: &Storage, cancelled: &dyn Fn() -> bool) -> Result<Option<PathBuf>> {
+    crate::sfv::check_volumes_cancellable(storage, cancelled)
 }
 
 /// Before continuing a crashed run, deletes what it wrote for batches it

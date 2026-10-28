@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::archive::storage::{Reads, Storage};
 
@@ -51,15 +51,22 @@ pub fn parse_sfv(content: &str) -> Vec<SfvEntry> {
 }
 
 /// Computes the CRC-32 of a file by reading it in 128 KiB chunks.
-pub fn file_crc32(path: &Path, reads: &Reads) -> Result<u32> {
-    let mut file =
-        File::open(path).with_context(|| format!("opening {} to verify CRC-32", path.display()))?;
+pub fn file_crc32(path: &Path, reads: &Reads, cancelled: &dyn Fn() -> bool) -> Result<u32> {
+    let mut file = File::open(path).with_context(|| {
+        format!(
+            "opening {} to verify CRC-32. Nothing was modified",
+            path.display()
+        )
+    })?;
     let mut hasher = crc32fast::Hasher::new();
     let mut buf = [0u8; 128 * 1024];
     loop {
+        if cancelled() {
+            bail!("SFV verification cancelled. Nothing was modified");
+        }
         let n = file
             .read(&mut buf)
-            .with_context(|| format!("reading {}", path.display()))?;
+            .with_context(|| format!("reading {}. Nothing was modified", path.display()))?;
         if n == 0 {
             break;
         }
@@ -127,6 +134,14 @@ fn entries_match_archive(entries: &[SfvEntry], parts: &[crate::archive::storage:
 /// `Ok(None)` if no `.sfv` file exists next to the archive, or an error if a volume
 /// fails its CRC-32 check or is missing.
 pub fn check_volumes(storage: &Storage) -> Result<Option<PathBuf>> {
+    check_volumes_cancellable(storage, &|| false)
+}
+
+/// Checks each chunk for cancellation before reading it.
+pub fn check_volumes_cancellable(
+    storage: &Storage,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<PathBuf>> {
     if storage.sfv_checked() {
         return Ok(None);
     }
@@ -142,21 +157,20 @@ pub fn check_volumes(storage: &Storage) -> Result<Option<PathBuf>> {
         .to_string_lossy();
 
     // Check if any volume listed in the SFV for this set is missing on disk.
-    // Determine common stem of the archive set.
     let primary_name = storage
         .primary()
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let prefix = if let Some((stem, _)) = primary_name.rsplit_once('.') {
-        stem
-    } else {
-        &primary_name
-    };
-
     for entry in &entries {
-        if entry.file_name.starts_with(prefix) {
+        if same_volume_set(&primary_name, &entry.file_name)
+            && !storage.parts().iter().any(|part| {
+                part.path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&entry.file_name))
+            })
+        {
             let volume_path = dir.join(&entry.file_name);
             if !volume_path.exists() {
                 bail!(
@@ -168,19 +182,16 @@ pub fn check_volumes(storage: &Storage) -> Result<Option<PathBuf>> {
         }
     }
 
-    let total = storage
-        .parts()
-        .iter()
-        .filter(|part| {
-            part.path.file_name().is_some_and(|name| {
-                entries.iter().any(|entry| {
-                    name.to_string_lossy()
-                        .eq_ignore_ascii_case(&entry.file_name)
-                })
-            })
-        })
-        .map(|part| part.len)
-        .sum();
+    for part in storage.parts() {
+        let name = part.path.file_name().unwrap_or_default().to_string_lossy();
+        if !entries
+            .iter()
+            .any(|entry| entry.file_name.eq_ignore_ascii_case(&name))
+        {
+            bail!("{name} has no checksum in {sfv_display}. Nothing was modified");
+        }
+    }
+    let total = storage.parts().iter().map(|part| part.len).sum();
     storage.expect_reads(total);
     let reads = storage.reads();
 
@@ -196,8 +207,7 @@ pub fn check_volumes(storage: &Storage) -> Result<Option<PathBuf>> {
             .iter()
             .find(|e| e.file_name.eq_ignore_ascii_case(&part_name))
         {
-            let computed = file_crc32(&part.path, &reads)
-                .map_err(|e| anyhow!("{e:#}. Nothing was modified"))?;
+            let computed = file_crc32(&part.path, &reads, cancelled)?;
             if computed != entry.crc32 {
                 bail!(
                     "{} does not match its CRC-32 in {} (expected {:08x}, computed {:08x}). Nothing was modified",
@@ -212,6 +222,44 @@ pub fn check_volumes(storage: &Storage) -> Result<Option<PathBuf>> {
 
     storage.mark_sfv_checked();
     Ok(Some(sfv_path))
+}
+
+// Recognise numbered volumes, not arbitrary files sharing an archive prefix.
+fn same_volume_set(primary: &str, candidate: &str) -> bool {
+    let primary = primary.to_ascii_lowercase();
+    let candidate = candidate.to_ascii_lowercase();
+    if primary == candidate {
+        return true;
+    }
+    let Some((stem, ext)) = primary.rsplit_once('.') else {
+        return false;
+    };
+    if ext.len() == 3 && ext.bytes().all(|b| b.is_ascii_digit()) {
+        return candidate.rsplit_once('.').is_some_and(|(s, e)| {
+            s == stem && e.len() == 3 && e.bytes().all(|b| b.is_ascii_digit())
+        });
+    }
+    if ext == "rar" {
+        if let Some((base, digits)) = stem.rsplit_once(".part")
+            && !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            return candidate
+                .strip_suffix(".rar")
+                .and_then(|s| s.rsplit_once(".part"))
+                .is_some_and(|(s, n)| {
+                    s == base && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                });
+        }
+        return candidate.rsplit_once('.').is_some_and(|(s, e)| {
+            let b = e.as_bytes();
+            s == stem
+                && b.len() == 3
+                && (b'r'..=b'z').contains(&b[0])
+                && b[1..].iter().all(u8::is_ascii_digit)
+        });
+    }
+    false
 }
 
 #[cfg(test)]
@@ -261,7 +309,7 @@ game.7z.002 4F3D612A
         fs::write(&file, b"123456789").unwrap();
         // Standard check value for ASCII "123456789" is 0xCBF43926
         let reads = Reads::default();
-        let crc = file_crc32(&file, &reads).unwrap();
+        let crc = file_crc32(&file, &reads, &|| false).unwrap();
         assert_eq!(crc, 0xCBF43926);
         assert_eq!(reads.done.load(Ordering::Relaxed), 9);
     }
@@ -297,5 +345,84 @@ game.7z.002 4F3D612A
         check_volumes(&storage).unwrap();
 
         assert_eq!(storage.reads().fraction(), Some(1.0));
+    }
+    #[test]
+    fn incomplete_manifest_is_refused_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("game.7z.001");
+        fs::write(&first, b"one").unwrap();
+        fs::write(first.with_extension("002"), b"two").unwrap();
+        fs::write(
+            dir.path().join("game.7z.sfv"),
+            format!("game.7z.001 {:08X}\n", crc32fast::hash(b"one")),
+        )
+        .unwrap();
+        let storage = Storage::open(&first, false).unwrap();
+        let error = check_volumes(&storage).unwrap_err().to_string();
+        assert!(error.contains("game.7z.002 has no checksum"));
+        assert!(!storage.sfv_checked());
+        assert_eq!(storage.reads().done.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn unrelated_entries_with_same_prefix_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("game.zip");
+        fs::write(&archive, b"archive").unwrap();
+        fs::write(
+            dir.path().join("game.sfv"),
+            format!(
+                "game.zip {:08X}\ngame-notes.txt 12345678\n",
+                crc32fast::hash(b"archive")
+            ),
+        )
+        .unwrap();
+        let storage = Storage::open(&archive, false).unwrap();
+        assert!(check_volumes(&storage).unwrap().is_some());
+        assert!(storage.sfv_checked());
+    }
+
+    #[test]
+    fn cancellation_between_chunks_does_not_mark_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("game.zip");
+        let bytes = vec![42; 256 * 1024];
+        fs::write(&archive, &bytes).unwrap();
+        fs::write(
+            dir.path().join("game.sfv"),
+            format!("game.zip {:08X}\n", crc32fast::hash(&bytes)),
+        )
+        .unwrap();
+        let storage = Storage::open(&archive, false).unwrap();
+        let reads = storage.reads();
+        let error = check_volumes_cancellable(&storage, &|| reads.done.load(Ordering::Relaxed) > 0)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cancelled. Nothing was modified")
+        );
+        assert_eq!(reads.done.load(Ordering::Relaxed), 128 * 1024);
+        assert!(!storage.sfv_checked());
+        assert_eq!(fs::read(&archive).unwrap(), bytes);
+        assert!(check_volumes(&storage).unwrap().is_some());
+    }
+
+    #[test]
+    fn volume_names_match_only_the_same_set() {
+        for (first, next) in [
+            ("game.7z.001", "game.7z.003"),
+            ("game.part01.rar", "game.part02.rar"),
+            ("game.rar", "game.r00"),
+        ] {
+            assert!(same_volume_set(first, next));
+        }
+        for (first, other) in [
+            ("game.zip", "game-notes.txt"),
+            ("game.7z.001", "game.7z.notes"),
+            ("game.rar", "game-extra.r00"),
+        ] {
+            assert!(!same_volume_set(first, other));
+        }
     }
 }

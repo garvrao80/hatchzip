@@ -481,7 +481,11 @@ fn test_command(archive: &Path, secret: Secret) -> Result<u8> {
         Ok(None) => {}
         Err(e) => {
             eprintln!("{ERROR}error:{ERROR:#} {e:#}");
-            return Ok(EXIT_DAMAGED);
+            return Ok(if STOP.load(Ordering::Relaxed) {
+                EXIT_PAUSED
+            } else {
+                EXIT_DAMAGED
+            });
         }
     }
     if let Err(e) = verify(&job) {
@@ -499,7 +503,7 @@ fn check_sfv(storage: &Storage) -> Result<Option<PathBuf>> {
     let reads = storage.reads();
     reads.reset();
     let reading = Reading::show(&reads);
-    let result = session::check_sfv(storage);
+    let result = session::check_sfv(storage, &|| STOP.load(Ordering::Relaxed));
     reading.finish();
     result
 }
@@ -774,7 +778,11 @@ fn extract(
                 Err(e) => {
                     eprintln!("{ERROR}error:{ERROR:#} {e:#}");
                     return Ok(Ended::Stopped {
-                        code: EXIT_DAMAGED,
+                        code: if STOP.load(Ordering::Relaxed) {
+                            EXIT_PAUSED
+                        } else {
+                            EXIT_DAMAGED
+                        },
                         saved: false,
                     });
                 }
