@@ -1,15 +1,262 @@
-//! Builds the contents tree without changing the extraction plan.
+//! The contents tree. An archive can hold a million entries, so the list view
+//! builds rows on demand for what is visible instead of keeping a model per row.
+//! The tree changes only the display, not the extraction plan.
 
 use crate::EntryRow;
 use hatchzip_core::{archive::Kind, engine::Job, human};
 use slint::{Model, ModelNotify, ModelTracker};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 pub struct Entry {
     path: Box<str>,
     size: u64,
     kind: Kind,
+}
+
+pub fn collect(job: &Job) -> Vec<Entry> {
+    job.units
+        .iter()
+        .rev()
+        .flat_map(|u| &u.items)
+        .map(|item| Entry {
+            path: item.path.to_string_lossy().into(),
+            size: item.size,
+            kind: item.kind.clone(),
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct Node {
+    name: String,
+    size: u64,
+    dir: bool,
+    link: bool,
+    expanded: bool,
+    children: Vec<usize>,
+}
+
+pub struct Entries {
+    nodes: Vec<Node>,
+    visible: Vec<(usize, i32)>,
+}
+
+impl Entries {
+    pub fn new(entries: Vec<Entry>) -> Self {
+        let mut tree = Self {
+            nodes: vec![Node {
+                dir: true,
+                ..Default::default()
+            }],
+            visible: Vec::new(),
+        };
+        let mut folders: HashMap<(usize, String), usize> = HashMap::new();
+        for entry in entries {
+            let parts: Vec<_> = entry
+                .path
+                .split(['/', '\\'])
+                .filter(|p| !p.is_empty() && *p != ".")
+                .collect();
+            let mut parent = 0;
+            let mut ancestors = vec![0];
+            for (i, part) in parts.iter().enumerate() {
+                let dir = i + 1 < parts.len() || entry.kind == Kind::Dir;
+                let existing = dir
+                    .then(|| folders.get(&(parent, (*part).to_string())).copied())
+                    .flatten();
+                let child = if let Some(child) = existing {
+                    child
+                } else {
+                    let child = tree.nodes.len();
+                    tree.nodes.push(Node {
+                        name: (*part).to_string(),
+                        dir,
+                        ..Default::default()
+                    });
+                    tree.nodes[parent].children.push(child);
+                    if dir {
+                        folders.insert((parent, (*part).to_string()), child);
+                    }
+                    child
+                };
+                parent = child;
+                if dir {
+                    ancestors.push(child);
+                }
+            }
+            if !parts.is_empty() && entry.kind != Kind::Dir {
+                tree.nodes[parent].size = entry.size;
+                tree.nodes[parent].link = entry.kind != Kind::File;
+                for node in ancestors {
+                    tree.nodes[node].size = tree.nodes[node].size.saturating_add(entry.size);
+                }
+            }
+        }
+        drop(folders);
+        // Names are kept once in the tree. Sort each folder only after all
+        // entries have been collected, then discard the temporary sort keys.
+        for i in 0..tree.nodes.len() {
+            let mut children = std::mem::take(&mut tree.nodes[i].children);
+            children.sort_by_cached_key(|&child| {
+                let node = &tree.nodes[child];
+                (!node.dir, node.name.to_lowercase(), node.name.clone())
+            });
+            tree.nodes[i].children = children;
+        }
+        if let [root] = tree.nodes[0].children.as_slice() {
+            let root = *root;
+            if tree.nodes[root].dir {
+                tree.nodes[root].expanded = true;
+            }
+        }
+        tree.rebuild();
+        tree
+    }
+
+    fn rebuild(&mut self) {
+        self.visible.clear();
+        let mut stack: Vec<_> = self.nodes[0]
+            .children
+            .iter()
+            .rev()
+            .map(|&n| (n, 0))
+            .collect();
+        while let Some((node, depth)) = stack.pop() {
+            self.visible.push((node, depth));
+            if self.nodes[node].expanded {
+                stack.extend(
+                    self.nodes[node]
+                        .children
+                        .iter()
+                        .rev()
+                        .map(|&n| (n, depth + 1)),
+                );
+            }
+        }
+    }
+
+    pub fn toggle(&mut self, row: usize, expand: Option<bool>) -> Option<(bool, usize)> {
+        let &(node, depth) = self.visible.get(row)?;
+        if !self.nodes[node].dir {
+            return None;
+        }
+        let expanded = expand.unwrap_or(!self.nodes[node].expanded);
+        if self.nodes[node].expanded == expanded {
+            return None;
+        }
+        self.nodes[node].expanded = expanded;
+        if !expanded {
+            let end = self.visible[row + 1..]
+                .iter()
+                .position(|&(_, d)| d <= depth)
+                .map_or(self.visible.len(), |n| row + 1 + n);
+            let count = end - row - 1;
+            self.visible.drain(row + 1..end);
+            Some((false, count))
+        } else {
+            let mut stack: Vec<_> = self.nodes[node]
+                .children
+                .iter()
+                .rev()
+                .map(|&n| (n, depth + 1))
+                .collect();
+            let mut added = Vec::new();
+            while let Some((child, child_depth)) = stack.pop() {
+                added.push((child, child_depth));
+                if self.nodes[child].expanded {
+                    stack.extend(
+                        self.nodes[child]
+                            .children
+                            .iter()
+                            .rev()
+                            .map(|&n| (n, child_depth + 1)),
+                    );
+                }
+            }
+            let count = added.len();
+            self.visible.splice(row + 1..row + 1, added);
+            Some((true, count))
+        }
+    }
+
+    #[cfg(test)]
+    pub fn rows(&self) -> Vec<EntryRow> {
+        self.visible
+            .iter()
+            .map(|&(i, depth)| {
+                let n = &self.nodes[i];
+                EntryRow {
+                    name: n.name.as_str().into(),
+                    size: if n.link {
+                        "link".into()
+                    } else {
+                        human(n.size).into()
+                    },
+                    dir: n.dir,
+                    expanded: n.expanded,
+                    depth,
+                }
+            })
+            .collect()
+    }
+}
+
+pub struct EntriesModel {
+    tree: RefCell<Entries>,
+    notify: ModelNotify,
+}
+
+impl EntriesModel {
+    pub fn new(tree: Entries) -> Self {
+        Self {
+            tree: RefCell::new(tree),
+            notify: ModelNotify::default(),
+        }
+    }
+
+    pub fn toggle(&self, row: usize, expand: Option<bool>) {
+        let change = self.tree.borrow_mut().toggle(row, expand);
+        if let Some((added, count)) = change {
+            if count > 0 {
+                if added {
+                    self.notify.row_added(row + 1, count);
+                } else {
+                    self.notify.row_removed(row + 1, count);
+                }
+            }
+            self.notify.row_changed(row);
+        }
+    }
+}
+
+impl Model for EntriesModel {
+    type Data = EntryRow;
+
+    fn row_count(&self) -> usize {
+        self.tree.borrow().visible.len()
+    }
+
+    fn row_data(&self, row: usize) -> Option<EntryRow> {
+        let tree = self.tree.borrow();
+        let &(i, depth) = tree.visible.get(row)?;
+        let n = &tree.nodes[i];
+        Some(EntryRow {
+            name: n.name.as_str().into(),
+            size: if n.link {
+                "link".into()
+            } else {
+                human(n.size).into()
+            },
+            dir: n.dir,
+            expanded: n.expanded,
+            depth,
+        })
+    }
+
+    fn model_tracker(&self) -> &dyn ModelTracker {
+        &self.notify
+    }
 }
 
 #[cfg(test)]
@@ -115,231 +362,5 @@ mod tests {
         assert_eq!(tree.visible.len(), 100_001);
         assert_eq!(tree.nodes[1].size, 100_000);
         assert!(tree.rows().iter().all(|r| r.name != "file"));
-    }
-}
-
-pub fn collect(job: &Job) -> Vec<Entry> {
-    job.units
-        .iter()
-        .rev()
-        .flat_map(|u| &u.items)
-        .map(|item| Entry {
-            path: item.path.to_string_lossy().into(),
-            size: item.size,
-            kind: item.kind.clone(),
-        })
-        .collect()
-}
-
-#[derive(Default)]
-struct Node {
-    name: String,
-    size: u64,
-    dir: bool,
-    link: bool,
-    expanded: bool,
-    children: BTreeMap<(bool, String, String), usize>,
-}
-
-pub struct Entries {
-    nodes: Vec<Node>,
-    visible: Vec<(usize, i32)>,
-}
-
-impl Entries {
-    pub fn new(entries: Vec<Entry>) -> Self {
-        let mut tree = Self {
-            nodes: vec![Node {
-                dir: true,
-                ..Default::default()
-            }],
-            visible: Vec::new(),
-        };
-        for entry in entries {
-            let parts: Vec<_> = entry
-                .path
-                .split(['/', '\\'])
-                .filter(|p| !p.is_empty() && *p != ".")
-                .collect();
-            let mut parent = 0;
-            let mut ancestors = vec![0];
-            for (i, part) in parts.iter().enumerate() {
-                let dir = i + 1 < parts.len() || entry.kind == Kind::Dir;
-                let key = (!dir, part.to_lowercase(), (*part).to_string());
-                let child = if let Some(&child) = tree.nodes[parent].children.get(&key) {
-                    child
-                } else {
-                    let child = tree.nodes.len();
-                    tree.nodes.push(Node {
-                        name: (*part).to_string(),
-                        dir,
-                        ..Default::default()
-                    });
-                    tree.nodes[parent].children.insert(key, child);
-                    child
-                };
-                parent = child;
-                if dir {
-                    ancestors.push(child);
-                }
-            }
-            if !parts.is_empty() && entry.kind != Kind::Dir {
-                tree.nodes[parent].size = entry.size;
-                tree.nodes[parent].link = entry.kind != Kind::File;
-                for node in ancestors {
-                    tree.nodes[node].size = tree.nodes[node].size.saturating_add(entry.size);
-                }
-            }
-        }
-        let roots: Vec<_> = tree.nodes[0].children.values().copied().collect();
-        if roots.len() == 1 && tree.nodes[roots[0]].dir {
-            tree.nodes[roots[0]].expanded = true;
-        }
-        tree.rebuild();
-        tree
-    }
-
-    fn rebuild(&mut self) {
-        self.visible.clear();
-        let mut stack: Vec<_> = self.nodes[0]
-            .children
-            .values()
-            .rev()
-            .map(|&n| (n, 0))
-            .collect();
-        while let Some((node, depth)) = stack.pop() {
-            self.visible.push((node, depth));
-            if self.nodes[node].expanded {
-                stack.extend(
-                    self.nodes[node]
-                        .children
-                        .values()
-                        .rev()
-                        .map(|&n| (n, depth + 1)),
-                );
-            }
-        }
-    }
-
-    pub fn toggle(&mut self, row: usize, expand: Option<bool>) -> Option<(bool, usize)> {
-        let &(node, depth) = self.visible.get(row)?;
-        if !self.nodes[node].dir {
-            return None;
-        }
-        let expanded = expand.unwrap_or(!self.nodes[node].expanded);
-        if self.nodes[node].expanded == expanded {
-            return None;
-        }
-        self.nodes[node].expanded = expanded;
-        if !expanded {
-            let end = self.visible[row + 1..]
-                .iter()
-                .position(|&(_, d)| d <= depth)
-                .map_or(self.visible.len(), |n| row + 1 + n);
-            let count = end - row - 1;
-            self.visible.drain(row + 1..end);
-            Some((false, count))
-        } else {
-            let mut stack: Vec<_> = self.nodes[node]
-                .children
-                .values()
-                .rev()
-                .map(|&n| (n, depth + 1))
-                .collect();
-            let mut added = Vec::new();
-            while let Some((child, child_depth)) = stack.pop() {
-                added.push((child, child_depth));
-                if self.nodes[child].expanded {
-                    stack.extend(
-                        self.nodes[child]
-                            .children
-                            .values()
-                            .rev()
-                            .map(|&n| (n, child_depth + 1)),
-                    );
-                }
-            }
-            let count = added.len();
-            self.visible.splice(row + 1..row + 1, added);
-            Some((true, count))
-        }
-    }
-
-    #[cfg(test)]
-    pub fn rows(&self) -> Vec<EntryRow> {
-        self.visible
-            .iter()
-            .map(|&(i, depth)| {
-                let n = &self.nodes[i];
-                EntryRow {
-                    name: n.name.as_str().into(),
-                    size: if n.link {
-                        "link".into()
-                    } else {
-                        human(n.size).into()
-                    },
-                    dir: n.dir,
-                    expanded: n.expanded,
-                    depth,
-                }
-            })
-            .collect()
-    }
-}
-
-pub struct EntriesModel {
-    tree: RefCell<Entries>,
-    notify: ModelNotify,
-}
-
-impl EntriesModel {
-    pub fn new(tree: Entries) -> Self {
-        Self {
-            tree: RefCell::new(tree),
-            notify: ModelNotify::default(),
-        }
-    }
-
-    pub fn toggle(&self, row: usize, expand: Option<bool>) {
-        let change = self.tree.borrow_mut().toggle(row, expand);
-        if let Some((added, count)) = change {
-            if count > 0 {
-                if added {
-                    self.notify.row_added(row + 1, count);
-                } else {
-                    self.notify.row_removed(row + 1, count);
-                }
-            }
-            self.notify.row_changed(row);
-        }
-    }
-}
-
-impl Model for EntriesModel {
-    type Data = EntryRow;
-
-    fn row_count(&self) -> usize {
-        self.tree.borrow().visible.len()
-    }
-
-    fn row_data(&self, row: usize) -> Option<EntryRow> {
-        let tree = self.tree.borrow();
-        let &(i, depth) = tree.visible.get(row)?;
-        let n = &tree.nodes[i];
-        Some(EntryRow {
-            name: n.name.as_str().into(),
-            size: if n.link {
-                "link".into()
-            } else {
-                human(n.size).into()
-            },
-            dir: n.dir,
-            expanded: n.expanded,
-            depth,
-        })
-    }
-
-    fn model_tracker(&self) -> &dyn ModelTracker {
-        &self.notify
     }
 }
