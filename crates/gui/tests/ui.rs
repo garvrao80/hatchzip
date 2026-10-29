@@ -22,7 +22,7 @@ use hatchzip_gui::settings::Settings;
 use hatchzip_gui::{
     Palette, Phase, PlanView, Screen, TaskView, TaskWindow, main_window, task_window,
 };
-use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::language::ColorScheme;
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalSize, Model, Timer, TimerMode};
@@ -139,7 +139,13 @@ fn main_window_flow(scheme: ColorScheme, tag: &str) {
 
     // Click a folder and navigate the same tree by keyboard.
     let window = ui.window();
-    let pos = slint::LogicalPosition::new(90.0, 180.0);
+    let folder = ElementHandle::find_by_accessible_label(&ui, "bin")
+        .next()
+        .expect("the bin folder is visible");
+    let origin = folder.absolute_position();
+    let size = folder.size();
+    let pos =
+        slint::LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
     window.dispatch_event(WindowEvent::PointerMoved { position: pos });
     window.dispatch_event(WindowEvent::PointerPressed {
         position: pos,

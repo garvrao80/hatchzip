@@ -60,6 +60,8 @@ component EntryList inherits VerticalLayout {
     list := ListView {
         for row[index] in root.entries: Rectangle {
             height: 26px;
+            accessible-role: list-item;
+            accessible-label: row.name;
             background: root.selected == index && scope.has-focus ? Palette.alternate-background : transparent;
             HorizontalLayout {
                 padding-left: Theme.gutter + row.depth * 16px;
