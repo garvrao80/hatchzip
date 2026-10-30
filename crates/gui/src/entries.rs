@@ -30,6 +30,7 @@ pub fn collect(job: &Job) -> Vec<Entry> {
 #[derive(Default)]
 struct Node {
     name: String,
+    parent: usize,
     size: u64,
     dir: bool,
     link: bool,
@@ -71,6 +72,7 @@ impl Entries {
                     let child = tree.nodes.len();
                     tree.nodes.push(Node {
                         name: (*part).to_string(),
+                        parent,
                         dir,
                         ..Default::default()
                     });
@@ -180,6 +182,17 @@ impl Entries {
         }
     }
 
+    // Only rows requested by ListView allocate a full path for accessibility.
+    fn path(&self, mut node: usize) -> String {
+        let mut parts = Vec::new();
+        while node != 0 {
+            parts.push(self.nodes[node].name.as_str());
+            node = self.nodes[node].parent;
+        }
+        parts.reverse();
+        parts.join("/")
+    }
+
     #[cfg(test)]
     pub fn rows(&self) -> Vec<EntryRow> {
         self.visible
@@ -188,6 +201,7 @@ impl Entries {
                 let n = &self.nodes[i];
                 EntryRow {
                     name: n.name.as_str().into(),
+                    path: self.path(i).into(),
                     size: if n.link {
                         "link".into()
                     } else {
@@ -243,6 +257,7 @@ impl Model for EntriesModel {
         let n = &tree.nodes[i];
         Some(EntryRow {
             name: n.name.as_str().into(),
+            path: tree.path(i).into(),
             size: if n.link {
                 "link".into()
             } else {
@@ -320,6 +335,35 @@ mod tests {
                 .map(|r| r.name.as_str().to_string())
                 .collect::<Vec<_>>(),
             ["folder", "nested", "file", "a.txt"]
+        );
+    }
+
+    #[test]
+    fn repeated_names_keep_their_full_paths() {
+        let model = EntriesModel::new(Entries::new(vec![
+            file("root/a/bin/tool", 1),
+            file("root/b/bin/tool", 2),
+        ]));
+        for path in ["root/a", "root/a/bin", "root/b", "root/b/bin"] {
+            let row = (0..model.row_count())
+                .find(|&row| model.row_data(row).unwrap().path == path)
+                .unwrap();
+            model.toggle(row, Some(true));
+        }
+        let paths: Vec<_> = (0..model.row_count())
+            .map(|row| model.row_data(row).unwrap().path.to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "root",
+                "root/a",
+                "root/a/bin",
+                "root/a/bin/tool",
+                "root/b",
+                "root/b/bin",
+                "root/b/bin/tool"
+            ]
         );
     }
 

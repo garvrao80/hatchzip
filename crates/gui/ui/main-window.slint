@@ -10,6 +10,7 @@ export enum Mode { fresh, resume, orphan }
 
 export struct EntryRow {
     name: string,
+    path: string,
     size: string,
     dir: bool,
     expanded: bool,
@@ -20,11 +21,13 @@ component EntryList inherits VerticalLayout {
     in property <[EntryRow]> entries;
     in property <string> empty-text;
     property <int> selected: 0;
+    property <length> row-height: 26px;
+    init => { scope.focus(); }
     callback toggle(int, int);
     function show-selection() {
-        let y = list.content-y + root.selected * 26px;
+        let y = list.content-y + root.selected * root.row-height;
         if y < 0px { list.content-y -= y; }
-        if y + 26px > list.visible-height { list.content-y -= y + 26px - list.visible-height; }
+        if y + root.row-height > list.visible-height { list.content-y -= y + root.row-height - list.visible-height; }
     }
 
     Rectangle {
@@ -59,9 +62,16 @@ component EntryList inherits VerticalLayout {
         }
     list := ListView {
         for row[index] in root.entries: Rectangle {
-            height: 26px;
+            height: root.row-height;
             accessible-role: list-item;
-            accessible-label: row.name;
+            accessible-label: row.path;
+            accessible-description: row.dir ? "Folder" : row.size == "link" ? "Link" : "File";
+            accessible-expandable: row.dir;
+            accessible-expanded: row.expanded;
+            accessible-item-selectable: true;
+            accessible-item-selected: root.selected == index;
+            accessible-action-default => { root.selected = index; scope.focus(); if row.dir { root.toggle(index, 0); } }
+            accessible-action-expand => { root.selected = index; scope.focus(); if row.dir { root.toggle(index, 0); } }
             background: root.selected == index && scope.has-focus ? Palette.alternate-background : transparent;
             HorizontalLayout {
                 padding-left: Theme.gutter + row.depth * 16px;
